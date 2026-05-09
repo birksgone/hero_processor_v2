@@ -1,2 +1,50 @@
-*.csv
-*json
+# Local game/language source data
+data/
+
+# Generated processor outputs
+output_data/
+debug_hero_data.json
+hero_skill_output*.csv
+familiar_parameter_log.csv
+viewer.html
+
+# Ad-hoc local exports / scrape-review outputs
+source_scrape_results*.json
+source_scrape_results*.csv
+*.log
+*.tmp
+tmp/
+out/
+output/
+
+# Python cache / test cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets / local config
+.env
+.env.*
+client_secret.json
+credentials.json
+service_account*.json
+
+# Editor / agent local state
+.vscode/
+.claude/
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Manual backup files
+* copy.py

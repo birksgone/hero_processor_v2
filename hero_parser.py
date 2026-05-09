@@ -97,37 +97,38 @@ def _find_and_parse_extra_description(
 # --- Core Data Integration Logic (Unchanged) ---
 def get_full_hero_data(base_data: dict, game_db: dict) -> dict:
     resolved_data = json.loads(json.dumps(base_data))
-    processed_ids = set()
-    _resolve_recursive(resolved_data, game_db['master_db'], processed_ids)
+    seen_objects = set()  # メモリアドレス：同一Pythonオブジェクトの再処理防止
+    _resolve_recursive(resolved_data, game_db['master_db'], seen_objects, frozenset())
     return resolved_data
 
-def _resolve_recursive(current_data, master_db, processed_ids):
-    if id(current_data) in processed_ids: return
-    processed_ids.add(id(current_data))
+def _resolve_recursive(current_data, master_db, seen_objects, id_chain):
+    # 同一オブジェクトの再帰防止（ループ防止）
+    if id(current_data) in seen_objects: return
+    seen_objects.add(id(current_data))
     ID_KEYS_FOR_LISTS = ['properties','statusEffects','statusEffectsPerHit','summonedFamiliars','effects','passiveSkills','costumeBonusPassiveSkillIds','statusEffectsToAdd','statusEffectCollections']
+    EXTRA_ID_KEYS = {'specialidifconditiontrue', 'specialidifconditionfalse'}
     if isinstance(current_data, dict):
         for key, value in list(current_data.items()):
-            if key.lower().endswith('id') and isinstance(value, str):
-                if value in master_db and value not in processed_ids:
-                    processed_ids.add(value)
+            if (key.lower().endswith('id') or key.lower() in EXTRA_ID_KEYS) and isinstance(value, str):
+                # id_chain で循環参照のみ防止。同じIDが別文脈で出現する場合は独立して解決する
+                if value in master_db and value not in id_chain:
                     new_data = json.loads(json.dumps(master_db[value]))
-                    _resolve_recursive(new_data, master_db, processed_ids)
+                    _resolve_recursive(new_data, master_db, seen_objects, id_chain | {value})
                     current_data[f"{key}_details"] = new_data
             elif key in ID_KEYS_FOR_LISTS and isinstance(value, list):
-                _resolve_recursive(value, master_db, processed_ids)
+                _resolve_recursive(value, master_db, seen_objects, id_chain)
             elif isinstance(value, (dict, list)):
-                _resolve_recursive(value, master_db, processed_ids)
+                _resolve_recursive(value, master_db, seen_objects, id_chain)
     elif isinstance(current_data, list):
         for i, item in enumerate(current_data):
             item_id_to_resolve = item if isinstance(item, str) else (item.get('id') if isinstance(item, dict) else None)
-            if item_id_to_resolve and item_id_to_resolve in master_db and item_id_to_resolve not in processed_ids:
-                processed_ids.add(item_id_to_resolve)
+            if item_id_to_resolve and item_id_to_resolve in master_db and item_id_to_resolve not in id_chain:
                 new_data = json.loads(json.dumps(master_db[item_id_to_resolve]))
-                _resolve_recursive(new_data, master_db, processed_ids)
+                _resolve_recursive(new_data, master_db, seen_objects, id_chain | {item_id_to_resolve})
                 if isinstance(current_data[i], str): current_data[i] = new_data
                 else: current_data[i].update(new_data)
             elif isinstance(item, (dict, list)):
-                 _resolve_recursive(item, master_db, processed_ids)
+                _resolve_recursive(item, master_db, seen_objects, id_chain)
 
 # --- Analysis & Parsing Functions (Unchanged) ---
 def get_hero_final_stats(hero_id: str, hero_stats_db: dict) -> dict:
@@ -214,7 +215,10 @@ def _collect_keywords_recursively(data_block, depth=0, max_depth=2) -> list:
 
 def find_best_lang_id(data_block: dict, lang_key_subset: list, parsers: dict, parent_block: dict = None) -> (str, str):
     if 'statusEffect' in data_block:
-        buff_map = {"MinorDebuff":"minor","MajorDebuff":"major","MinorBuff":"minor","MajorBuff":"major","PermanentDebuff":"permanent","PermanentBuff":"permanent"}
+        buff_map = {"MinorDebuff":"minor","MajorDebuff":"major","MinorBuff":"minor","MajorBuff":"major",
+                    "StackMinorDebuff":"minor","StackMajorDebuff":"major",
+                    "StackMinorBuff":"minor","StackMajorBuff":"major",
+                    "PermanentDebuff":"permanent","PermanentBuff":"permanent"}
         intensity = buff_map.get(data_block.get('buff'))
         status_effect_val = data_block.get('statusEffect'); effect_name = status_effect_val.lower() if isinstance(status_effect_val, str) else None
         target_from_data = (parent_block or data_block).get('statusTargetType', ''); target = target_from_data.lower() if isinstance(target_from_data, str) else ''
@@ -296,7 +300,7 @@ def parse_direct_effect(special_data, hero_stats, lang_db, game_db, hero_id: str
     elif base < 0 or inc < 0:
         params[placeholder] = abs(round(total_per_mil / 100))
     desc = generate_description(lang_id, params, lang_db)
-    return {"lang_id": lang_id, "params": json.dumps(params), **desc}
+    return {"id": "direct_effect", "lang_id": lang_id, "params": json.dumps(params), **desc}
 
 def parse_properties(properties_list: list, special_data: dict, hero_stats: dict, lang_db: dict, game_db: dict, hero_id: str, rules: dict, parsers: dict) -> (list, list):
     if not properties_list: return [], []
@@ -334,6 +338,31 @@ def parse_properties(properties_list: list, special_data: dict, hero_stats: dict
                     nested_effects.extend(parsed_ses); warnings.extend(new_warnings)
             parsed_items.append({"id":prop_id,"lang_id":container_lang_id,"description_en":container_desc["en"],"description_ja":container_desc["ja"],"params":"{}","nested_effects":nested_effects})
             continue
+        if property_type == "BranchingSpecial":
+            # 分岐条件テキストの lang_id を special.title.branching_special.* 空間から検索
+            branching_lang_subset = [k for k in lang_db if k.startswith("special.title.branching_special")]
+            cond_lang_id, warning = find_best_lang_id(prop_data, branching_lang_subset, parsers)
+            if warning: warnings.append(warning)
+            if not cond_lang_id: cond_lang_id = "SEARCH_FAILED"
+            cond_desc = generate_description(cond_lang_id, {}, lang_db)
+            nested_effects = []
+            for branch_key, label_en, label_ja in [
+                ("specialIdIfConditionTrue_details",  "If True:",  "条件True:"),
+                ("specialIdIfConditionFalse_details", "If False:", "条件False:"),
+            ]:
+                branch_special = prop_data.get(branch_key)
+                if not isinstance(branch_special, dict) or not branch_special: continue
+                nested_effects.append({"id": "heading", "description_en": label_en, "description_ja": label_ja})
+                if branch_special.get("directEffect", {}).get("effectType"):
+                    nested_effects.append(parsers['direct_effect'](branch_special, hero_stats, lang_db, game_db, hero_id, rules, parsers))
+                if "properties" in branch_special:
+                    parsed_props, new_warns = parsers['properties'](branch_special.get("properties", []), branch_special, hero_stats, lang_db, game_db, hero_id, rules, parsers)
+                    nested_effects.extend(parsed_props); warnings.extend(new_warns)
+                if "statusEffects" in branch_special:
+                    parsed_ses, new_warns = parsers['status_effects'](branch_special.get("statusEffects", []), branch_special, hero_stats, lang_db, game_db, hero_id, rules, parsers)
+                    nested_effects.extend(parsed_ses); warnings.extend(new_warns)
+            parsed_items.append({"id": prop_id, "lang_id": cond_lang_id, "params": "{}", "nested_effects": nested_effects, **cond_desc})
+            continue
         lang_id = rules.get("lang_overrides",{}).get("specific",{}).get(hero_id,{}).get(prop_id) or rules.get("lang_overrides",{}).get("common",{}).get(prop_id)
         if not lang_id:
             lang_id, warning = find_best_lang_id(prop_data, prop_lang_subset, parsers, parent_block=special_data)
@@ -367,6 +396,11 @@ def parse_status_effects(status_effects_list: list, special_data: dict, hero_sta
         if not isinstance(effect_instance, dict): continue
         effect_id = effect_instance.get("id"); combined_details = effect_instance
         if not effect_id: continue
+        # Phase1でbattle.jsonのデータがマージされなかった場合、game_dbから直接補完する
+        if 'statusEffect' not in combined_details:
+            se_from_db = game_db.get('status_effects', {}).get(effect_id, {})
+            if se_from_db:
+                combined_details = {**se_from_db, **combined_details}
         lang_id = rules.get("lang_overrides",{}).get("specific",{}).get(hero_id,{}).get(effect_id) or rules.get("lang_overrides",{}).get("common",{}).get(effect_id)
         if not lang_id:
             lang_id, warning = find_best_lang_id(combined_details, se_lang_subset, parsers, parent_block=special_data)

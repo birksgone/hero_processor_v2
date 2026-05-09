@@ -109,69 +109,41 @@ def _format_final_description(skill_descriptions: dict, lang: str, skill_types_t
     return main_description, tooltip_lines
 
 
-def write_final_csv(hero_data: list, output_path: Path):
-    """Writes the parsed hero data to a CSV file."""
+def write_final_csv(hero_data, output_path):
+    """
+    全てのヒーローデータをCSVに書き出す。
+    固定のリストを使わず、データ内に存在する全てのキーを自動的に列（ヘッダー）として採用する。
+    """
     if not hero_data:
-        print("No data to write.")
+        print(" -> No data to write to final CSV.")
         return
 
-    # ★変更: ss_lang_key, passive_lang_key を追加
-    fieldnames = [
-        "hero_id", "hero_name", 
-        "ss_lang_key", "passive_lang_key", 
-        "passive_en", "passive_ja", 
-        "ss_en", "ss_ja", 
-        "extra_en_1", "extra_ja_1", 
-        "extra_en_2", "extra_ja_2"
-    ]
+    print(f" -> Writing final CSV with all available fields to {output_path.name}...")
 
-    print(f"\n--- Writing final results to {output_path.name} ---")
-    
-    # 行数が多い場合の分割ロジック
-    MAX_ROWS = 600
-    rows = hero_data
-    num_chunks = (len(rows) // MAX_ROWS) + (1 if len(rows) % MAX_ROWS > 0 else 0)
-    
-    # output_path はすでに OUTPUT_DIR 内のパスになっているので、
-    # その親ディレクトリ (OUTPUT_DIR) を取得して分割ファイルの保存先に使います
-    parent_dir = output_path.parent
+    # 1. 全てのデータからユニークなキー（列名）を自動収集する
+    all_keys = set()
+    for d in hero_data:
+        all_keys.update(d.keys())
 
-    if num_chunks > 1:
-        print(f"Data is large. Splitting into {num_chunks} files of ~{MAX_ROWS} rows each.")
-        for i in range(num_chunks):
-            start = i * MAX_ROWS
-            end = start + MAX_ROWS
-            chunk_rows = rows[start:end]
-            
-            chunk_filename = f"{output_path.stem}_{i+1}.csv"
-            chunk_path = parent_dir / chunk_filename
-            
-            try:
-                with open(chunk_path, 'w', newline='', encoding='utf-8-sig') as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    for hero in chunk_rows:
-                        # 辞書からデータを取得 (.getで安全に)
-                        row_data = {k: hero.get(k, "") for k in fieldnames}
-                        # リスト型が入っていた場合の対策
-                        if isinstance(row_data.get('ss_lang_key'), list):
-                             row_data['ss_lang_key'] = str(row_data['ss_lang_key'])
-                        writer.writerow(row_data)
-                print(f" -> Successfully saved chunk {i+1} to {chunk_filename}.")
-            except Exception as e:
-                 print(f"Error writing chunk {i+1}: {e}")
-    else:
-        # 分割なし
-        try:
-            with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                for hero in rows:
-                    row_data = {k: hero.get(k, "") for k in fieldnames}
-                    writer.writerow(row_data)
-            print(f"Successfully saved {len(hero_data)} rows to {output_path.name}.")
-        except Exception as e:
-            print(f"Error writing CSV: {e}")
+    # 2. 列の並び順を整理する（IDや名前を先頭に持ってくる）
+    # 並び順を固定したい主要な項目
+    primary_cols = ["hero_id", "hero_name"]
+    # それ以外の項目をアルファベット順に並べる
+    other_cols = sorted([k for k in all_keys if k not in primary_cols])
+    
+    fieldnames = primary_cols + other_cols
+
+    try:
+        with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in hero_data:
+                # row（辞書）の内容をそのまま書き込む。
+                # fieldnamesに含まれるキーが自動的に対応する列に配置される。
+                writer.writerow(row)
+        print(f" -> Successfully saved {len(hero_data)} heroes to CSV.")
+    except Exception as e:
+        print(f" -> [ERROR] Error writing final CSV: {e}")
 
 
 def write_debug_csv(processed_data: list, output_path: Path):
@@ -206,7 +178,7 @@ def write_debug_csv(processed_data: list, output_path: Path):
             update_row_with_item(p, f'prop_{i+1}')
             # Handle nested effects within properties
             if nested_effects := p.get('nested_effects', []):
-                for j, ne in enumerate(nested_effects[:2]):
+                for j, ne in enumerate(nested_effects[:12]):
                     if isinstance(ne, dict):
                          update_row_with_item(ne, f'prop_{i+1}_nested_{j+1}')
 
@@ -215,7 +187,7 @@ def write_debug_csv(processed_data: list, output_path: Path):
             update_row_with_item(e, f'se_{i+1}')
             # Handle nested effects within status effects
             if nested_effects := e.get('nested_effects', []):
-                for j, ne in enumerate(nested_effects[:2]):
+                for j, ne in enumerate(nested_effects[:4]):
                     if isinstance(ne, dict):
                         update_row_with_item(ne, f'se_{i+1}_nested_{j+1}')
         
@@ -372,7 +344,7 @@ def analyze_unresolved_placeholders(final_hero_data: list):
                     if found: unresolved_counter.update(found)
     
     if not unresolved_counter:
-        print("✅ All placeholders resolved successfully!")
+        print("All placeholders resolved successfully!")
     else:
         print(f"{'Placeholder':<30} | {'Count':<10}")
         print("-" * 43)
@@ -400,7 +372,7 @@ def main():
             'direct_effect': parse_direct_effect, 'clear_buffs': parse_clear_buffs,
             'properties': parse_properties, 'status_effects': parse_status_effects,
             'familiars': parse_familiars, 'passive_skills': parse_passive_skills,
-            'se_lang_subset': [key for key in language_db if key.startswith("specials.v2.statuseffect.")],
+            'se_lang_subset': [key for key in language_db if key.startswith("specials.v2.statuseffect.") or key.startswith("specialproperty.statuseffect.")],
             'prop_lang_subset': [key for key in language_db if key.startswith("specials.v2.property.")],
             # --- NEW: Pre-filter all lang_ids that contain '.extra' for efficient searching ---
             'extra_lang_ids': [key for key in language_db if '.extra' in key]
@@ -414,7 +386,7 @@ def main():
         # ▲▲▲ ここに貼り付け ▲▲▲
         param_log = parsers.get('familiar_parameter_log', [])
         if param_log:
-            print(f"\n--- 📝 Writing familiar parameter log... ---")
+            print(f"\n--- Writing familiar parameter log... ---")
             try:
                 param_df = pd.DataFrame(param_log)
                 # 上部で定義した FAMILIAR_LOG_PATH (output_data内) を使用
@@ -426,11 +398,11 @@ def main():
         warnings_list = parsers.get('warnings_list', [])
         if warnings_list:
             unique_warnings = parsers.get('unique_warnings_set', set())
-            print(f"\n--- 🚨 Found {len(warnings_list)} lang_id search failures ({len(unique_warnings)} unique types) ---")
+            print(f"\n--- [!] Found {len(warnings_list)} lang_id search failures ({len(unique_warnings)} unique types) ---")
         
         analyze_unresolved_placeholders(final_hero_data)
         
-        print(f"\n✅ Process complete. All files saved.")
+        print(f"\nProcess complete. All files saved.")
 
     except Exception as e:
         print(f"\n[FATAL ERROR]: {type(e).__name__} - {e}")

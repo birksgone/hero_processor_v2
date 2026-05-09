@@ -12,10 +12,12 @@ import pandas as pd
 # --- User Configuration (パス設定エリア) ---
 # 1. ゲームデータ (JSON / 統計CSV) の場所
 GAME_DATA_ROOT = Path(r"D:\PyScript\EMP Extract")
-GAME_DATA_FOLDER = "V8202R-2026-01-17"  # ★ここを変えるだけでバージョン切替可能
+GAME_DATA_FOLDER = "V8502R-2026-05-07"  # ★ここを変えるだけでバージョン切替可能
 
-# 2. 言語データ (English.csv / Japanese.csv) の場所 (フルパス)
-LANG_DATA_DIR = Path(r"D:\Nox Screeshot\Nox SS Directory\Download\v32\Download\Download\V82\v82.02.2026-01-16\TextAsset-v82.02.2026-01-16")
+# 2. 言語データ (English.csv / Japanese.csv) の場所
+#    data/ フォルダに置く（update_lang.py で R2 から自動取得）
+#    data/ が空の場合は旧パスにフォールバック
+_FALLBACK_LANG_DIR = Path(r"D:\Nox Screeshot\Nox SS Directory\Download\v32\Download\Download\V85\V8502\TextAsset-V8502")
 
 # --- Constants & Derived Paths ---
 try:
@@ -27,9 +29,11 @@ except NameError:
 DATA_DIR = GAME_DATA_ROOT / GAME_DATA_FOLDER
 
 # --- File Paths ---
-# 言語ファイルは LANG_DATA_DIR を参照
-CSV_EN_PATH = LANG_DATA_DIR / "English.csv"
-CSV_JA_PATH = LANG_DATA_DIR / "Japanese.csv"
+# 言語ファイル: プロジェクトの data/ を優先、なければ旧パスを使用
+_LOCAL_EN = SCRIPT_DIR / "data" / "English.csv"
+_LOCAL_JA = SCRIPT_DIR / "data" / "Japanese.csv"
+CSV_EN_PATH = _LOCAL_EN if _LOCAL_EN.exists() else _FALLBACK_LANG_DIR / "English.csv"
+CSV_JA_PATH = _LOCAL_JA if _LOCAL_JA.exists() else _FALLBACK_LANG_DIR / "Japanese.csv"
 
 # ゲームデータは DATA_DIR を参照
 HERO_STATS_CSV_PATTERN = "hdb4-V*.csv"
