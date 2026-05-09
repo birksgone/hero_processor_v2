@@ -19,7 +19,8 @@ from hero_data_loader import (
 from hero_parser import (
     get_full_hero_data, get_hero_final_stats,
     parse_direct_effect, parse_properties, parse_status_effects,
-    parse_familiars, parse_passive_skills, parse_clear_buffs
+    parse_familiars, parse_passive_skills, parse_clear_buffs,
+    parse_family_description
 )
 
 # --- Constants & Paths ---
@@ -34,6 +35,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)  # フォルダがなければ作成
 FINAL_CSV_PATH = OUTPUT_DIR / "hero_skill_output.csv"
 DEBUG_CSV_PATH = OUTPUT_DIR / "hero_skill_output_debug.csv"
 DEBUG_JSON_PATH = OUTPUT_DIR / "debug_hero_data.json"
+FAMILY_JSON_PATH = OUTPUT_DIR / "hero_family_output.json"
 FAMILIAR_LOG_PATH = OUTPUT_DIR / "familiar_parameter_log.csv"
 
 # --- Formatting & Output Functions ---
@@ -196,10 +198,16 @@ def write_debug_csv(processed_data: list, output_path: Path):
             update_row_with_item(f, f'fam_{i+1}')
             # (Note: Familiars will be updated later to also output extra info for their effects)
 
+        passive_keys_to_keep = [
+            'id', 'lang_id', 'params', 'source', 'display_label', 'display_order',
+            'passiveSkillType', 'title_lang_id', 'description_lang_id',
+            'title_en', 'title_ja', 'description_en', 'description_ja'
+        ]
         passives = skills.get('passiveSkills', [])
-        for i, ps in enumerate(passives[:3]):
-            # Passives do not have extra info, so no change here
-            row.update({f'passive_{i+1}_{k}': v for k, v in ps.items() if k in keys_to_keep})
+        for i, ps in enumerate(passives[:10]):
+            row.update({f'passive_{i+1}_{k}': v for k, v in ps.items() if k in passive_keys_to_keep})
+            if isinstance(ps.get("icon"), dict):
+                row[f'passive_{i+1}_icon_file'] = ps["icon"].get("file", "")
 
         all_rows.append(row)
         
@@ -223,6 +231,22 @@ def write_debug_json(debug_data: dict, output_path: Path):
         print(f"Successfully saved debug data for {len(debug_data)} heroes.")
     except Exception as e:
         print(f"FATAL: Failed to write debug JSON: {e}")
+
+
+def write_family_json(processed_data: list, output_path: Path):
+    """Writes family bonus descriptions separately from skill output."""
+    print(f"\n--- Writing family data to {output_path.name} ---")
+    family_data = {
+        hero.get("id"): hero.get("familyDescription")
+        for hero in processed_data
+        if hero.get("id") and hero.get("familyDescription")
+    }
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(family_data, f, indent=2, ensure_ascii=False)
+        print(f"Successfully saved family data for {len(family_data)} heroes.")
+    except Exception as e:
+        print(f"FATAL: Failed to write family JSON: {e}")
 
 # --- NEW: Two-Phase Processing Functions ---
 
@@ -264,6 +288,7 @@ def phase_two_parse_skills(debug_data: dict, lang_db: dict, game_db: dict, hero_
         hero_final_stats = get_hero_final_stats(hero_id, hero_stats_db)
         processed_hero = full_hero_data.copy()
         processed_hero['name'] = hero_final_stats.get('name')
+        processed_hero['familyDescription'] = parse_family_description(full_hero_data, lang_db, game_db)
         
         skill_descriptions = {}
         special_data_for_hero = None
@@ -308,7 +333,22 @@ def phase_two_parse_skills(debug_data: dict, lang_db: dict, game_db: dict, hero_
             if isinstance(costume_bonuses, dict):
                  costume_passive_list = costume_bonuses.get('passiveSkills', [])
 
-        all_passives = passive_list + costume_passive_list
+        def tag_passives(items, source, label_prefix):
+            tagged = []
+            for index, item in enumerate(items or [], start=1):
+                if not isinstance(item, dict):
+                    continue
+                tagged_item = item.copy()
+                tagged_item["_passive_source"] = source
+                tagged_item["_display_label"] = f"{label_prefix} {index}"
+                tagged_item["_display_order"] = index
+                tagged.append(tagged_item)
+            return list(reversed(tagged))
+
+        all_passives = (
+            tag_passives(passive_list, "base", "Passive") +
+            tag_passives(costume_passive_list, "costume", "Costume Passive")
+        )
         if all_passives:
             parsed_passives, new_warnings = parsers['passive_skills'](all_passives, hero_final_stats, lang_db, game_db, hero_id, rules, parsers)
             skill_descriptions['passiveSkills'] = parsed_passives
@@ -382,6 +422,7 @@ def main():
         
         write_final_csv(final_hero_data, FINAL_CSV_PATH)
         write_debug_csv(final_hero_data, DEBUG_CSV_PATH)
+        write_family_json(final_hero_data, FAMILY_JSON_PATH)
         
         # ▲▲▲ ここに貼り付け ▲▲▲
         param_log = parsers.get('familiar_parameter_log', [])
