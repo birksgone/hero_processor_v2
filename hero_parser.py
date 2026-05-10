@@ -30,10 +30,142 @@ def generate_description(lang_id: str, lang_params: dict, lang_db: dict) -> dict
     return {"en": desc_en, "ja": desc_ja}
 
 def format_value(value):
-    """Formats numbers for display, removing trailing .0"""
-    if isinstance(value, float) and value.is_integer(): return int(value)
-    if isinstance(value, float): return f"{value:.1f}"
+    """Formats numbers for display, removing trailing .0 and noisy decimals."""
+    if isinstance(value, float):
+        rounded = round(value, 4)
+        if rounded.is_integer():
+            return int(rounded)
+        return f"{rounded:g}"
     return value
+
+
+def _format_signed(value):
+    formatted = format_value(value)
+    if isinstance(value, (int, float)) and value > 0:
+        return f"+{formatted}"
+    return formatted
+
+
+def _leveled_permil_percent(data: dict, base_key: str, inc_key: str, max_level: int):
+    value = _leveled_fixed_value(data, base_key, inc_key, max_level)
+    if value is None:
+        return None
+    return value / 10
+
+
+def _leveled_modifier_percent(data: dict, base_key: str, inc_key: str, max_level: int):
+    value = _leveled_fixed_value(data, base_key, inc_key, max_level)
+    if value is None:
+        return None
+    return (value - 1000) / 10
+
+
+def _increasing_status_effect_params(data_block: dict, max_level: int, placeholders: set[str]) -> dict:
+    """
+    Explicit param rules for Increasing* status effects.
+
+    These are common patterns, not hero-specific exceptions:
+    - stat modifier bases are relative to 1000 permil and need +/- signs
+    - per-turn increments use their own increment keys
+    - CAP / MAXDEFLECTION include the base value plus max stacked increases
+    """
+    params = {}
+
+    if "DEFENSE" in placeholders and "defenseMultiplierPerMil" in data_block:
+        defense = _leveled_modifier_percent(
+            data_block,
+            "defenseMultiplierPerMil",
+            "defenseMultiplierIncrementPerLevelPerMil",
+            max_level,
+        )
+        if defense is not None:
+            params["DEFENSE"] = _format_signed(defense)
+
+    if "DEFLECTION" in placeholders and "damageDeflectionPerMil" in data_block:
+        deflection = _leveled_permil_percent(
+            data_block,
+            "damageDeflectionPerMil",
+            "damageDeflectionPerLevelPerMil",
+            max_level,
+        )
+        if deflection is not None:
+            params["DEFLECTION"] = format_value(deflection)
+
+    if "INCREASEPERTURN" in placeholders:
+        if "damageDeflectionIncrementPerTurnPerMil" in data_block:
+            value = _leveled_permil_percent(
+                data_block,
+                "damageDeflectionIncrementPerTurnPerMil",
+                "damageDeflectionIncrementPerTurnPerLevelPerMil",
+                max_level,
+            )
+            if value is not None:
+                params["INCREASEPERTURN"] = _format_signed(value)
+        elif "defenseMultiplierIncrementPerTurnPerMil" in data_block:
+            value = _leveled_permil_percent(
+                data_block,
+                "defenseMultiplierIncrementPerTurnPerMil",
+                "defenseMultiplierIncrementPerTurnPerLevelPerMil",
+                max_level,
+            )
+            if value is not None:
+                params["INCREASEPERTURN"] = format_value(value)
+
+    if "CAP" in placeholders and "maxIncreases" in data_block:
+        base = _leveled_modifier_percent(
+            data_block,
+            "defenseMultiplierPerMil",
+            "defenseMultiplierIncrementPerLevelPerMil",
+            max_level,
+        )
+        step = _leveled_permil_percent(
+            data_block,
+            "defenseMultiplierIncrementPerTurnPerMil",
+            "defenseMultiplierIncrementPerTurnPerLevelPerMil",
+            max_level,
+        )
+        count = data_block.get("maxIncreases")
+        if isinstance(base, (int, float)) and isinstance(step, (int, float)) and isinstance(count, (int, float)):
+            params["CAP"] = _format_signed(base + step * count)
+
+    if "MAXDEFLECTION" in placeholders and "maxIncrementCount" in data_block:
+        base = _leveled_permil_percent(
+            data_block,
+            "damageDeflectionPerMil",
+            "damageDeflectionPerLevelPerMil",
+            max_level,
+        )
+        step = _leveled_permil_percent(
+            data_block,
+            "damageDeflectionIncrementPerTurnPerMil",
+            "damageDeflectionIncrementPerTurnPerLevelPerMil",
+            max_level,
+        )
+        count = data_block.get("maxIncrementCount")
+        if isinstance(base, (int, float)) and isinstance(step, (int, float)) and isinstance(count, (int, float)):
+            params["MAXDEFLECTION"] = _format_signed(base + step * count)
+
+    return params
+
+
+def _placeholder_keywords(p_holder: str) -> list[str]:
+    raw = p_holder.lower()
+    collapsed = re.sub(r"[^a-z0-9]+", "", raw).replace("increment", "increase")
+    keywords = {collapsed}
+    if collapsed.startswith("max") and len(collapsed) > 3:
+        keywords.add(collapsed[3:])
+    if "perturn" in collapsed:
+        keywords.add("perturn")
+        keywords.add(collapsed.replace("perturn", ""))
+    if "chance" in collapsed:
+        keywords.add("chance")
+    if "damage" in collapsed:
+        keywords.add("damage")
+    if "deflection" in collapsed:
+        keywords.add("deflection")
+    if "defense" in collapsed:
+        keywords.add("defense")
+    return [kw for kw in keywords if len(kw) >= 3]
 
 # --- NEW: Centralized Tooltip Parsing Helper (Robust Version) ---
 def _find_and_parse_extra_description(
@@ -866,16 +998,21 @@ def find_and_calculate_value(p_holder: str, data_block: dict, max_level: int, he
                     return int(value), f"Exception Rule: {found_key}"
         return None, f"Exception rule key '{key_to_find}' not found or ambiguous"
     if not isinstance(data_block, dict): return None, None
+    explicit_params = _increasing_status_effect_params(data_block, max_level, {p_holder_upper})
+    if p_holder_upper in explicit_params:
+        return explicit_params[p_holder_upper], f"Explicit Rule: {p_holder_upper}"
     flat_data = flatten_json(data_block)
     if ignore_keywords:
         keys_to_remove = {k for k in flat_data if any(ik in k.lower() for ik in ignore_keywords)}
         for k in keys_to_remove: del flat_data[k]
-    ph_keywords = [s.lower() for s in re.findall('[A-Z][^A-Z]*', p_holder)] or [p_holder.lower()]
+    ph_keywords = _placeholder_keywords(p_holder)
     candidates = []
     for key, value in flat_data.items():
         if not isinstance(value, (int, float)): continue
         key_lower = key.lower()
+        normalized_key = re.sub(r"[^a-z0-9]+", "", key_lower).replace("increment", "increase")
         matched_keywords = sum(1 for kw in ph_keywords if kw in key_lower)
+        matched_keywords += sum(2 for kw in ph_keywords if kw in normalized_key and kw not in key_lower)
         if matched_keywords > 0:
             score = matched_keywords * 10
             if 'power' in key_lower or 'modifier' in key_lower: score += 5
@@ -1143,6 +1280,7 @@ def parse_status_effects(status_effects_list: list, special_data: dict, hero_sta
             lang_params.update(_moonbeam_params(combined_details, main_max_level))
         template_text = lang_db.get(lang_id,{}).get("en","")
         placeholders = set(re.findall(r'\{(\w+)\}', template_text))
+        lang_params.update(_increasing_status_effect_params(combined_details, main_max_level, placeholders))
         for p_holder in placeholders:
             if p_holder in lang_params: continue
             value, found_key = find_and_calculate_value(p_holder, search_context, main_max_level, hero_id, rules, is_modifier='modifier' in combined_details.get('statusEffect','').lower())
