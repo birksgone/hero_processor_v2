@@ -22,6 +22,17 @@ Do not push from AI sessions. The user handles Git operations manually.
 
 Do not run destructive Git commands. Do not commit unless explicitly asked.
 
+## Model Usage
+
+Conserve usage limits by choosing the smallest suitable Codex model/reasoning
+setting for the work.
+
+- Planning, architecture, and difficult design review: Codex 5.5 high.
+- Implementation and non-trivial code changes: Codex 5.4 high.
+- Simple UI work and minor display fixes: Codex 5.4 low.
+- If the active session cannot switch models, treat this as handoff guidance for
+  the next agent/session.
+
 ## Main Outputs
 
 Generated files live under `output_data\`:

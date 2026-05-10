@@ -1,0 +1,16 @@
+{
+  "Growth": {
+    "extra_lang_id": "specials.v2.property.growth.extra",
+    "params": {
+      "MINSTAT": 30,
+      "MAXSTAT": 170
+    }
+  },
+  "Wither": {
+    "extra_lang_id": "specials.v2.property.wither.extra",
+    "params": {
+      "MINSTAT": 30,
+      "MAXSTAT": 170
+    }
+  }
+}

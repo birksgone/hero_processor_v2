@@ -33,6 +33,8 @@ DATA_DIR = GAME_DATA_ROOT / GAME_DATA_FOLDER
 _LOCAL_EN = SCRIPT_DIR / "data" / "English.csv"
 _LOCAL_JA = SCRIPT_DIR / "data" / "Japanese.csv"
 PASSIVE_MASTER_PATH = SCRIPT_DIR / "rules" / "passive_master.csv"
+PROPERTY_EXTRA_RULES_PATH = SCRIPT_DIR / "rules" / "property_extra_rules.json"
+FAMILY_LANG_RULES_PATH = SCRIPT_DIR / "rules" / "family_lang_rules.json"
 SOURCE_TEXT_DIR = Path(r"D:\PyScript\Hero Text Scraper\data\source_text\google_sheets_skill")
 CSV_EN_PATH = _LOCAL_EN if _LOCAL_EN.exists() else _FALLBACK_LANG_DIR / "English.csv"
 CSV_JA_PATH = _LOCAL_JA if _LOCAL_JA.exists() else _FALLBACK_LANG_DIR / "Japanese.csv"
@@ -204,6 +206,8 @@ def load_game_data() -> dict:
     
     game_data['passive_skills'] = {ps['id']: ps for ps in battle_config.get('passiveSkills', [])}
     game_data['passive_master'] = load_passive_master(PASSIVE_MASTER_PATH)
+    game_data['property_extra_rules'] = load_property_extra_rules(PROPERTY_EXTRA_RULES_PATH)
+    game_data['family_lang_rules'] = load_family_lang_rules(FAMILY_LANG_RULES_PATH)
     game_data['source_texts'] = load_source_texts(SOURCE_TEXT_DIR)
 
     # --- NEW: Load and consolidate keys that have extra descriptions (tooltips) ---
@@ -253,6 +257,7 @@ def load_passive_master(path: Path) -> dict:
                 "icon": (row.get("icon") or "").strip(),
                 "title_lang_id": (row.get("title_lang_id") or "").strip(),
                 "description_lang_id": (row.get("description_lang_id") or "").strip(),
+                "change_formula": (row.get("change_formula") or "").strip(),
             }
             for row in rows
             if (row.get("id") or "").strip()
@@ -262,6 +267,62 @@ def load_passive_master(path: Path) -> dict:
     except Exception as e:
         print(f" -> Warning: Could not load passive master. Error: {e}")
         return {}
+
+
+def load_property_extra_rules(path: Path) -> dict:
+    """Loads special-property tooltip rules that need fixed params or exact lang_ids."""
+    if not path.exists():
+        print(f" -> Property extra rules not found: {path.name}")
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            print(f" -> Warning: Property extra rules must be a JSON object: {path.name}")
+            return {}
+        print(f" -> Loaded {len(data)} property extra rules.")
+        return data
+    except Exception as e:
+        print(f" -> Warning: Could not load property extra rules. Error: {e}")
+        return {}
+
+
+def load_family_lang_rules(path: Path) -> dict:
+    """Loads family description/effect lang_id overrides and candidate patterns."""
+    default = {
+        "description_lang_id_overrides": {},
+        "effect_lang_id_overrides": {},
+        "candidate_patterns": {
+            "family_description": [
+                "herocard.family.description.common.{family_id}",
+                "herocard.realmbonus.description.common.{family_id}",
+            ],
+            "family_effect": [
+                "familybonuses.description.long.{effect_id}",
+                "familybonuses.description.short.{effect_id}",
+            ],
+        },
+    }
+    if not path.exists():
+        print(f" -> Family lang rules not found: {path.name}")
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            print(f" -> Warning: Family lang rules must be a JSON object: {path.name}")
+            return default
+        merged = default.copy()
+        merged.update(data)
+        merged["candidate_patterns"] = {
+            **default["candidate_patterns"],
+            **(data.get("candidate_patterns") or {}),
+        }
+        print(f" -> Loaded family lang rules from {path.name}.")
+        return merged
+    except Exception as e:
+        print(f" -> Warning: Could not load family lang rules. Error: {e}")
+        return default
 
 
 def load_source_texts(path: Path) -> dict:

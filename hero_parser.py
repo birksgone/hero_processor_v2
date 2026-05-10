@@ -98,6 +98,148 @@ def _has_extra_description(game_db: dict, key: str) -> bool:
     return bool(key) and key.lower() in game_db.get("extra_description_keys", set())
 
 
+def _leveled_fixed_value(data: dict, base_key: str, inc_key: str, max_level: int):
+    base = data.get(base_key)
+    inc = data.get(inc_key, 0)
+    if base is None and inc_key not in data:
+        return None
+    if not isinstance(base, (int, float)):
+        base = 0
+    if not isinstance(inc, (int, float)):
+        inc = 0
+    value = base + inc * (max_level - 1)
+    return int(value) if isinstance(value, float) and value.is_integer() else value
+
+
+def _base_stat_property_lang_id(prop_data: dict, lang_db: dict) -> str:
+    """Builds exact lang_id for Wither/Growth fixed ability-score changes."""
+    property_type = prop_data.get("propertyType", "")
+    if property_type not in {"Wither", "Growth"}:
+        return ""
+
+    stat_parts = []
+    attack_value = (prop_data.get("baseAttackIncrease") or 0) + (prop_data.get("baseAttackIncreasePerLevel") or 0)
+    defense_value = (prop_data.get("baseDefenseIncrease") or 0) + (prop_data.get("baseDefenseIncreasePerLevel") or 0)
+    if attack_value:
+        stat_parts.append("attack")
+    if defense_value:
+        stat_parts.append("defense")
+    if not stat_parts:
+        return ""
+
+    key = ".".join([
+        "specials.v2.property",
+        property_type.lower(),
+        "none",
+        str(prop_data.get("targetType", "")).lower(),
+        str(prop_data.get("sideAffected", "")).lower(),
+        ".".join(stat_parts),
+    ])
+    return key if key in lang_db else ""
+
+
+def _base_stat_property_params(prop_data: dict, max_level: int) -> dict:
+    params = {}
+    attack = _leveled_fixed_value(prop_data, "baseAttackIncrease", "baseAttackIncreasePerLevel", max_level)
+    defense = _leveled_fixed_value(prop_data, "baseDefenseIncrease", "baseDefenseIncreasePerLevel", max_level)
+    if attack:
+        params["ATTACKINCREASE"] = attack
+    if defense:
+        params["DEFENSEINCREASE"] = defense
+    return params
+
+
+def _extra_from_rule(rule: dict, lang_db: dict) -> dict:
+    lang_id = (rule or {}).get("extra_lang_id", "")
+    params = (rule or {}).get("params", {})
+    if not lang_id or lang_id not in lang_db:
+        return {}
+    desc = generate_description(lang_id, {k: format_value(v) for k, v in params.items()}, lang_db)
+    return {
+        "lang_id": lang_id,
+        "params": json.dumps(params, ensure_ascii=False),
+        **desc,
+    }
+
+
+def _moonbeam_lang_id(data_block: dict, lang_key_subset: list) -> str:
+    if data_block.get("statusEffect") != "MoonBeamStatusEffectSkill":
+        return ""
+
+    buff_map = {"MinorDebuff":"minor","MajorDebuff":"major","MinorBuff":"minor","MajorBuff":"major",
+                "StackMinorDebuff":"minor","StackMajorDebuff":"major",
+                "StackMinorBuff":"minor","StackMajorBuff":"major",
+                "PermanentDebuff":"permanent","PermanentBuff":"permanent"}
+    intensity = buff_map.get(data_block.get("buff"), "minor")
+    target = str(data_block.get("statusTargetType", "")).lower()
+    side = str(data_block.get("sideAffected", "")).lower()
+    if not target or not side:
+        return ""
+
+    effect_parts = []
+    append_with_chance = False
+    for effect in data_block.get("directEffects") or []:
+        effect_type = effect.get("effectType", "")
+        target_type = str(effect.get("typeOfTarget", "Random")).lower()
+        if effect_type == "Damage":
+            effect_parts.extend(["damage", target_type, "enemies"])
+        elif effect_type == "AddMana":
+            effect_parts.extend(["addmana", target_type, "enemies"])
+        elif effect_type == "ReduceMaxHealth":
+            effect_parts.extend(["reducemaxhealth", target_type, "enemies"])
+            append_with_chance = True
+    if not effect_parts:
+        return ""
+
+    parts = [
+        "specials.v2.statuseffect",
+        intensity,
+        "moonbeamstatuseffectskill",
+        target,
+        side,
+        "on",
+        "turnend",
+        *effect_parts,
+    ]
+    if append_with_chance:
+        parts.append("with_chance")
+    lang_id = ".".join(parts)
+    return lang_id if lang_id in lang_key_subset else ""
+
+
+def _moonbeam_params(data_block: dict, max_level: int) -> dict:
+    params = {}
+    for index, effect in enumerate(data_block.get("directEffects") or [], start=1):
+        effect_type = effect.get("effectType", "")
+        if effect_type == "Damage":
+            value = _leveled_fixed_value(
+                effect,
+                "powerMultiplierPerMil",
+                "powerMultiplierIncrementPerLevelPerMil",
+                max_level,
+            )
+            if value is not None:
+                params[f"POWER{index}"] = value / 10
+        elif effect_type == "ReduceMaxHealth":
+            value = _leveled_fixed_value(effect, "fixedPower", "fixedPowerIncrementPerLevel", max_level)
+            if value is not None:
+                params[f"REDUCTION{index}"] = -abs(value)
+        elif effect_type == "AddMana":
+            value = _leveled_fixed_value(
+                effect,
+                "powerMultiplierPerMil",
+                "powerMultiplierIncrementPerLevelPerMil",
+                max_level,
+            )
+            if value is not None:
+                params[f"ABSPOWER{index}"] = abs(value / 10)
+                params[f"POWER{index}"] = value / 10
+    return {
+        key: int(value) if isinstance(value, float) and value.is_integer() else value
+        for key, value in params.items()
+    }
+
+
 def _clean_lang_markup(text: str) -> str:
     """Removes display markup used by the game language files."""
     if not text:
@@ -121,6 +263,141 @@ def _family_effect_lang_key(effect_id: str, lang_db: dict) -> str:
     if len(parts) > 2:
         return f"familybonuses.description.long.{base_effect_id}"
     return exact_key
+
+
+def _candidate_record(lang_id: str, lang_db: dict, source: str) -> dict:
+    return {
+        "lang_id": lang_id,
+        "exists": bool(lang_id and lang_id in lang_db),
+        "source": source,
+    }
+
+
+def _dedupe_candidates(candidates: list[dict]) -> list[dict]:
+    seen = set()
+    result = []
+    for candidate in candidates:
+        lang_id = candidate.get("lang_id", "")
+        if not lang_id or lang_id in seen:
+            continue
+        seen.add(lang_id)
+        result.append(candidate)
+    return result
+
+
+def _lang_template_text(lang_id: str, lang_db: dict) -> str:
+    template = lang_db.get(lang_id, {})
+    return f"{template.get('en', '')}\n{template.get('ja', '')}"
+
+
+def _template_placeholders(lang_id: str, lang_db: dict) -> set[str]:
+    return set(re.findall(r"\{(\w+)\}", _lang_template_text(lang_id, lang_db)))
+
+
+def _select_family_description_lang_id(family_id: str, lang_db: dict, rules: dict) -> dict:
+    rules = rules or {}
+    override = (rules.get("description_lang_id_overrides") or {}).get(family_id, "")
+    candidates = []
+    if override:
+        candidates.append(_candidate_record(override, lang_db, "override"))
+
+    patterns = (rules.get("candidate_patterns") or {}).get("family_description", [])
+    for pattern in patterns:
+        candidates.append(_candidate_record(pattern.format(family_id=family_id), lang_db, "pattern"))
+
+    candidates = _dedupe_candidates(candidates)
+    selected = next((c for c in candidates if c["source"] == "override" and c["exists"]), None)
+    selected = selected or next((c for c in candidates if c["exists"]), None)
+    selected = selected or (candidates[0] if candidates else {"lang_id": "", "exists": False, "source": "none"})
+    return {
+        "lang_id": selected.get("lang_id", ""),
+        "method": selected.get("source", "none"),
+        "candidates": candidates,
+    }
+
+
+def _select_family_effect_lang_id(effect_id: str, lang_db: dict, rules: dict) -> dict:
+    rules = rules or {}
+    override = (rules.get("effect_lang_id_overrides") or {}).get(effect_id, "")
+    candidates = []
+    if override:
+        candidates.append(_candidate_record(override, lang_db, "override"))
+
+    patterns = (rules.get("candidate_patterns") or {}).get("family_effect", [])
+    for pattern in patterns:
+        candidates.append(_candidate_record(pattern.format(effect_id=effect_id), lang_db, "pattern"))
+
+    # Some family effects add semantic suffixes such as .onceperturn or
+    # .minordebuff. Prefer long descriptions, then short descriptions.
+    prefixes = [
+        f"familybonuses.description.long.{effect_id}.",
+        f"familybonuses.description.short.{effect_id}.",
+    ]
+    for prefix in prefixes:
+        for key in sorted(k for k in lang_db if k.startswith(prefix)):
+            candidates.append(_candidate_record(key, lang_db, "prefix_search"))
+
+    fallback = _family_effect_lang_key(effect_id, lang_db)
+    if fallback:
+        candidates.append(_candidate_record(fallback, lang_db, "fallback"))
+
+    candidates = _dedupe_candidates(candidates)
+    selected = next((c for c in candidates if c["source"] == "override" and c["exists"]), None)
+    selected = selected or next((c for c in candidates if c["exists"]), None)
+    selected = selected or (candidates[0] if candidates else {"lang_id": "", "exists": False, "source": "none"})
+    return {
+        "lang_id": selected.get("lang_id", ""),
+        "method": selected.get("source", "none"),
+        "candidates": candidates,
+    }
+
+
+def _select_family_status_effect_lang_id(effect_data: dict, lang_db: dict) -> dict:
+    """Selects long family status-effect template for nested family effect text."""
+    status_effects = effect_data.get("statusEffects", [])
+    first_ref = status_effects[0] if status_effects and isinstance(status_effects[0], dict) else {}
+    status_effect_id = first_ref.get("id", "")
+    status_name = (first_ref.get("statusEffect") or "").lower()
+    if not status_name and status_effect_id:
+        # Resolved familyEffect status effect references usually keep the full
+        # status effect data in the same dict after Phase 1.
+        status_name = (first_ref.get("statusEffect") or "").lower()
+
+    candidates = []
+    prefix = "familyeffect.statuseffect.long."
+    for key in sorted(k for k in lang_db if k.startswith(prefix)):
+        if "statuseffectperturn" not in key:
+            continue
+        if status_name and status_name not in key:
+            continue
+        if status_effect_id and status_effect_id not in key:
+            # The richer template for Moth Dust intentionally ends with
+            # `moth_dust` while the concrete game id is
+            # `moth_dust_with_mega_minion_wound`; keep it as a candidate if it
+            # exposes the nested placeholders we need.
+            template_text = _lang_template_text(key, lang_db)
+            if "{STATUSEFFECTS}" not in template_text:
+                continue
+        candidates.append(_candidate_record(key, lang_db, "family_status_effect_search"))
+
+    def score(candidate: dict) -> tuple[int, str]:
+        text = _lang_template_text(candidate["lang_id"], lang_db)
+        value = 0
+        if "{STATUSEFFECTS}" in text:
+            value += 10
+        if re.search(r"\{1MEMBERS?TURNS\}", text):
+            value += 6
+        if status_effect_id and status_effect_id in candidate["lang_id"]:
+            value += 2
+        return (-value, candidate["lang_id"])
+
+    candidates = _dedupe_candidates(candidates)
+    selected = sorted(candidates, key=score)[0] if candidates else {"lang_id": "", "exists": False, "source": "none"}
+    return {
+        "lang_id": selected.get("lang_id", ""),
+        "method": selected.get("source", "none"),
+        "candidates": candidates,
+    }
 
 
 def _family_bonus_percentages(raw_values: list) -> dict:
@@ -148,6 +425,241 @@ def _family_bonus_percentages(raw_values: list) -> dict:
     return params
 
 
+def _cumulative_permils(raw_values: list) -> list[float]:
+    if not isinstance(raw_values, list):
+        return []
+    total = 0
+    values = []
+    for value in raw_values:
+        if not isinstance(value, (int, float)):
+            continue
+        total += value
+        values.append(total / 10)
+    return values
+
+
+def _member_slots_from_placeholders(placeholders: set[str]) -> list[int]:
+    members = set()
+    for placeholder in placeholders:
+        match = re.match(r"^(\d+)MEMBERS?", placeholder.upper())
+        if match:
+            members.add(int(match.group(1)))
+    return sorted(members)
+
+
+def _build_bonus_title(members: list[int]) -> dict:
+    if not members:
+        return {}
+    joined = "/".join(str(member) for member in members)
+    return {
+        "members": members,
+        "source": "template_placeholders",
+        "en": f"Bonus for {joined} Heroes:",
+        "ja": f"英雄数が{joined}人の場合に付与されるボーナス：",
+    }
+
+
+def _member_turn_params(effect_data: dict, placeholders: set[str]) -> dict:
+    params = {}
+    members = _member_slots_from_placeholders(placeholders)
+    if not members:
+        return params
+    status_effects = effect_data.get("statusEffects", [])
+    first_ref = status_effects[0] if status_effects and isinstance(status_effects[0], dict) else {}
+    base_turns = first_ref.get("turns")
+    increments = effect_data.get("statusEffectDurationIncrementForEachMember", [])
+    if not isinstance(base_turns, (int, float)) or not isinstance(increments, list):
+        return params
+    for member in members:
+        increment = sum(
+            value for value in increments[:member]
+            if isinstance(value, (int, float))
+        )
+        for placeholder in placeholders:
+            if re.match(rf"^{member}MEMBERS?TURNS$", placeholder.upper()):
+                params[placeholder] = format_value(base_turns + increment)
+    return params
+
+
+def _per_mil_change(value, base: int = 1000):
+    if not isinstance(value, (int, float)):
+        return None
+    return format_value((value - base) / 10)
+
+
+def _per_mil_percent(value):
+    if not isinstance(value, (int, float)):
+        return None
+    return format_value(value / 10)
+
+
+def _find_multieffect_child_lang_id(status_effect: dict, lang_db: dict) -> str:
+    status_name = (status_effect.get("statusEffect") or "").lower()
+    if not status_name:
+        return ""
+    prefix = f"multieffectchild.statuseffect."
+    candidates = [key for key in lang_db if key.startswith(prefix) and status_name in key]
+    if not candidates:
+        return ""
+    affected = {str(v).lower() for v in status_effect.get("affectedFamiliarTypes", []) if v}
+
+    def score(key: str) -> tuple[int, str]:
+        value = 0
+        if status_effect.get("fullEffectToBigFamiliars") and "fulleffecttomegaminions" in key:
+            value += 4
+        if affected and any(item.lower() in key for item in affected):
+            value += 2
+        return (-value, key)
+
+    return sorted(candidates, key=score)[0]
+
+
+def _family_status_effect_child_params(status_effect: dict) -> dict:
+    params = {}
+    if "manaGenerationMultiplierPerMil" in status_effect:
+        params["MANAREGEN"] = _per_mil_change(status_effect.get("manaGenerationMultiplierPerMil"))
+    if "healthReductionPerMil" in status_effect:
+        params["HEALTHREDUCTION"] = _per_mil_percent(status_effect.get("healthReductionPerMil"))
+    return {k: v for k, v in params.items() if v is not None}
+
+
+def _family_data_rows(data: dict, context: str = "family") -> list[dict]:
+    rows = []
+
+    def flatten(node, prefix=""):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                full = f"{prefix}{key}" if prefix else key
+                if isinstance(value, dict):
+                    flatten(value, full + "_")
+                elif isinstance(value, list):
+                    for idx, item in enumerate(value, start=1):
+                        if isinstance(item, (dict, list)):
+                            flatten(item, f"{full}_{idx}_")
+                        else:
+                            rows.append({"key": f"{full}_{idx}", "value": item, "calc": ""})
+                else:
+                    rows.append({"key": full, "value": value, "calc": _family_calc(key, value)})
+        elif isinstance(node, list):
+            for idx, item in enumerate(node, start=1):
+                flatten(item, f"{prefix}{idx}_")
+
+    def _family_calc(key: str, value):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return ""
+        if "IncrementPerLevel" in key or key.endswith("PerLevel"):
+            return "ignored in family context"
+        if key == "manaGenerationMultiplierPerMil":
+            change = _per_mil_change(value)
+            pct = _per_mil_percent(value)
+            return f"{pct}% => {change}%"
+        if key in {"healthReductionPerMil", "receivedDamageMultiplierPerMil"}:
+            if key == "receivedDamageMultiplierPerMil":
+                return f"+{_per_mil_change(value)}%"
+            return f"{_per_mil_percent(value)}%"
+        if key.endswith("PerMil"):
+            return f"{_per_mil_percent(value)}%"
+        return ""
+
+    flatten(data)
+    return rows
+
+
+def _render_status_effect_text(lang_id: str, params: dict, lang_db: dict) -> dict:
+    if not lang_id:
+        return {"en": "", "ja": ""}
+    desc = generate_description(lang_id, params, lang_db) if lang_id in lang_db else {"en": "", "ja": ""}
+    return {
+        "en": _clean_lang_markup(desc.get("en", "")),
+        "ja": _clean_lang_markup(desc.get("ja", "")),
+    }
+
+
+def _build_family_status_effects(effect_data: dict, lang_db: dict, game_db: dict) -> list[dict]:
+    result = []
+    for ref in effect_data.get("statusEffects", []):
+        if not isinstance(ref, dict):
+            continue
+        status_id = ref.get("id", "")
+        status_data = game_db.get("status_effects", {}).get(status_id, {}).copy()
+        merged = {**status_data, **ref}
+        children = []
+        child_texts = {"en": [], "ja": []}
+        for child_id in merged.get("statusEffects", []):
+            child_data = game_db.get("status_effects", {}).get(child_id, {})
+            if not child_data:
+                continue
+            child_lang_id = _find_multieffect_child_lang_id(child_data, lang_db)
+            child_params = _family_status_effect_child_params(child_data)
+            child_rendered = _render_status_effect_text(child_lang_id, child_params, lang_db)
+            children.append({
+                "id": child_id,
+                "statusEffect": child_data.get("statusEffect", ""),
+                "lang_id": child_lang_id,
+                "params": json.dumps(child_params, ensure_ascii=False),
+                "en": child_rendered.get("en", ""),
+                "ja": child_rendered.get("ja", ""),
+                "raw": child_data,
+                "data_rows": _family_data_rows(child_data),
+            })
+            if child_rendered.get("en"):
+                child_texts["en"].append(f"[*]{child_rendered['en']}")
+            if child_rendered.get("ja"):
+                child_texts["ja"].append(f"[*]{child_rendered['ja']}")
+
+        removal_params = {}
+        removal_effects = []
+        for removal_index, removal in enumerate(merged.get("removalEffects", []), start=1):
+            for se_index, removal_ref in enumerate(removal.get("statusEffects", []), start=1):
+                removal_id = removal_ref.get("id", "") if isinstance(removal_ref, dict) else ""
+                removal_data = game_db.get("status_effects", {}).get(removal_id, {})
+                damage_modifier = _per_mil_change(removal_data.get("receivedDamageMultiplierPerMil"))
+                if damage_modifier is not None:
+                    removal_params[f"REMOVALEFFECT{removal_index}STATUSEFFECT{se_index}DAMAGEMODIFIER"] = damage_modifier
+                removal_effects.append({
+                    "id": removal_id,
+                    "statusEffect": removal_data.get("statusEffect", ""),
+                    "params": json.dumps({"DAMAGEMODIFIER": damage_modifier}, ensure_ascii=False),
+                    "raw": removal_data,
+                    "data_rows": _family_data_rows(removal_data),
+                })
+
+        result.append({
+            "id": status_id,
+            "statusEffect": merged.get("statusEffect", ""),
+            "params": json.dumps({}, ensure_ascii=False),
+            "raw": merged,
+            "data_rows": _family_data_rows(merged),
+            "children": children,
+            "child_texts": child_texts,
+            "removal_effects": removal_effects,
+            "removal_params": removal_params,
+        })
+    return result
+
+
+def _family_effect_params(effect_data: dict, lang_id: str, lang_db: dict) -> dict:
+    params = _family_bonus_percentages(effect_data.get("statMultiplierIncrementPerMilsForEachMember", []))
+    template = lang_db.get(lang_id, {})
+    template_text = f"{template.get('en', '')}\n{template.get('ja', '')}"
+    placeholders = set(re.findall(r"\{(\w+)\}", template_text))
+    multiplier_values = _cumulative_permils(effect_data.get("statMultiplierIncrementPerMilsForEachMember", []))
+    chance_values = _cumulative_permils(effect_data.get("chanceIncrementsPerMilForEachMember", []))
+
+    for placeholder in placeholders:
+        upper = placeholder.upper()
+        index_match = re.match(r"^(\d+)MEMBERS?", upper)
+        index = int(index_match.group(1)) if index_match else 1
+        if "MULTIPLIERPERCENT" in upper and "PERCENTCHANGE" not in upper and multiplier_values:
+            value = multiplier_values[min(index - 1, len(multiplier_values) - 1)]
+            params[placeholder] = format_value(value)
+        elif "CHANCE" in upper and chance_values:
+            value = chance_values[min(index - 1, len(chance_values) - 1)]
+            params[placeholder] = format_value(value)
+    params.update(_member_turn_params(effect_data, placeholders))
+    return params
+
+
 def parse_family_description(hero_data: dict, lang_db: dict, game_db: dict) -> dict:
     """Builds a dedicated family bonus block separate from skillDescriptions."""
     family_id = hero_data.get("family")
@@ -162,23 +674,60 @@ def parse_family_description(hero_data: dict, lang_db: dict, game_db: dict) -> d
             "effects": []
         }
 
-    description_lang_id = f"herocard.family.description.common.{family_id}"
+    family_rules = game_db.get("family_lang_rules", {})
+    description_resolution = _select_family_description_lang_id(family_id, lang_db, family_rules)
+    description_lang_id = description_resolution["lang_id"]
     description = generate_description(description_lang_id, {}, lang_db) if description_lang_id in lang_db else {"en": "", "ja": ""}
 
     parsed_effects = []
     for effect_ref in family_data.get("familyEffects", []):
         effect_id = effect_ref.get("id") if isinstance(effect_ref, dict) else effect_ref
         effect_data = game_db.get("family_effects", {}).get(effect_id, {})
-        lang_id = _family_effect_lang_key(effect_id, lang_db)
-        params = _family_bonus_percentages(effect_data.get("statMultiplierIncrementPerMilsForEachMember", []))
+        effect_resolution = _select_family_effect_lang_id(effect_id, lang_db, family_rules)
+        lang_id = effect_resolution["lang_id"]
+        family_status_resolution = {}
+        family_status_effects = []
+        if effect_data.get("effectType") == "StatusEffectPerTurn" and effect_data.get("statusEffects"):
+            family_status_resolution = _select_family_status_effect_lang_id(effect_data, lang_db)
+            if family_status_resolution.get("lang_id"):
+                lang_id = family_status_resolution["lang_id"]
+            family_status_effects = _build_family_status_effects(effect_data, lang_db, game_db)
+
+        params = _family_effect_params(effect_data, lang_id, lang_db)
+        if family_status_effects:
+            if "STATUSEFFECTS" in _template_placeholders(lang_id, lang_db):
+                # Use language-specific nested text when rendering below. Store
+                # params with Japanese child text for debug; per-language render
+                # is done manually just below.
+                params["STATUSEFFECTS"] = "\n".join(family_status_effects[0].get("child_texts", {}).get("ja", []))
+            for status_effect in family_status_effects:
+                params.update(status_effect.get("removal_params", {}))
         formatted_params = {k: v for k, v in params.items()}
-        effect_desc = generate_description(lang_id, formatted_params, lang_db) if lang_id in lang_db else {"en": "", "ja": ""}
+        if family_status_effects and "STATUSEFFECTS" in _template_placeholders(lang_id, lang_db):
+            en_params = formatted_params.copy()
+            ja_params = formatted_params.copy()
+            en_params["STATUSEFFECTS"] = "\n".join(family_status_effects[0].get("child_texts", {}).get("en", []))
+            ja_params["STATUSEFFECTS"] = "\n".join(family_status_effects[0].get("child_texts", {}).get("ja", []))
+            effect_desc = {
+                "en": generate_description(lang_id, en_params, lang_db).get("en", "") if lang_id in lang_db else "",
+                "ja": generate_description(lang_id, ja_params, lang_db).get("ja", "") if lang_id in lang_db else "",
+            }
+        else:
+            effect_desc = generate_description(lang_id, formatted_params, lang_db) if lang_id in lang_db else {"en": "", "ja": ""}
+        placeholders = _template_placeholders(lang_id, lang_db)
+        members = _member_slots_from_placeholders(placeholders)
         parsed_effects.append({
             "id": effect_id,
             "effectType": effect_data.get("effectType", ""),
             "lang_id": lang_id,
+            "lang_id_method": family_status_resolution.get("method") or effect_resolution.get("method", ""),
+            "lang_id_candidates": (family_status_resolution.get("candidates") or []) + effect_resolution.get("candidates", []),
+            "bonus_title": _build_bonus_title(members),
             "params": json.dumps(params),
             "raw_values": effect_data.get("statMultiplierIncrementPerMilsForEachMember", []),
+            "raw": effect_data,
+            "data_rows": _family_data_rows(effect_data),
+            "family_status_effects": family_status_effects,
             "en": _clean_lang_markup(effect_desc.get("en", "")),
             "ja": _clean_lang_markup(effect_desc.get("ja", "")),
         })
@@ -208,6 +757,8 @@ def parse_family_description(hero_data: dict, lang_db: dict, game_db: dict) -> d
     return {
         "family_id": family_id,
         "lang_id": description_lang_id,
+        "lang_id_method": description_resolution.get("method", ""),
+        "lang_id_candidates": description_resolution.get("candidates", []),
         "activeOnFullyAscendedMembersOnly": family_data.get("activeOnFullyAscendedMembersOnly", False),
         "en": _clean_lang_markup(description.get("en", "")),
         "ja": _clean_lang_markup(description.get("ja", "")),
@@ -367,6 +918,11 @@ def _collect_keywords_recursively(data_block, depth=0, max_depth=2) -> list:
     return keywords
 
 def find_best_lang_id(data_block: dict, lang_key_subset: list, parsers: dict, parent_block: dict = None) -> (str, str):
+    if data_block.get("statusEffect") == "MoonBeamStatusEffectSkill":
+        moonbeam_lang_id = _moonbeam_lang_id(data_block, lang_key_subset)
+        if moonbeam_lang_id:
+            return moonbeam_lang_id, None
+
     if 'statusEffect' in data_block:
         buff_map = {"MinorDebuff":"minor","MajorDebuff":"major","MinorBuff":"minor","MajorBuff":"major",
                     "StackMinorDebuff":"minor","StackMajorDebuff":"major",
@@ -521,6 +1077,8 @@ def parse_properties(properties_list: list, special_data: dict, hero_stats: dict
             continue
         lang_id = rules.get("lang_overrides",{}).get("specific",{}).get(hero_id,{}).get(prop_id) or rules.get("lang_overrides",{}).get("common",{}).get(prop_id)
         if not lang_id:
+            lang_id = _base_stat_property_lang_id(prop_data, lang_db)
+        if not lang_id:
             lang_id, warning = find_best_lang_id(prop_data, prop_lang_subset, parsers, parent_block=special_data)
             if warning: warnings.append(warning)
         if not lang_id:
@@ -530,8 +1088,12 @@ def parse_properties(properties_list: list, special_data: dict, hero_stats: dict
             if always_lang_id in lang_db:
                 lang_id = always_lang_id
         lang_params = {}; search_context = {**prop_data, "maxLevel": main_max_level}
+        if property_type in {"Wither", "Growth"}:
+            lang_params.update(_base_stat_property_params(prop_data, main_max_level))
         placeholders = set(re.findall(r'\{(\w+)\}', lang_db.get(lang_id,{}).get("en","")))
         for p_holder in placeholders:
+            if p_holder in lang_params:
+                continue
             value, _ = find_and_calculate_value(p_holder, search_context, main_max_level, hero_id, rules, is_modifier='modifier' in property_type.lower())
             if value is not None: lang_params[p_holder] = value
         main_desc = generate_description(lang_id, {k:format_value(v) for k,v in lang_params.items()}, lang_db)
@@ -540,7 +1102,10 @@ def parse_properties(properties_list: list, special_data: dict, hero_stats: dict
             parsed_ses, new_warnings = parsers['status_effects'](prop_data['statusEffects'], special_data, hero_stats, lang_db, game_db, hero_id, rules, parsers)
             nested_effects.extend(parsed_ses); warnings.extend(new_warnings)
         
-        if property_type == "BypassDefensiveBuffs" and _has_extra_description(game_db, property_type) and "specials.v2.property.bypassdefensivebuffs.extra" in lang_db:
+        property_extra_rule = game_db.get("property_extra_rules", {}).get(property_type, {})
+        if property_extra_rule:
+            extra_info = _extra_from_rule(property_extra_rule, lang_db)
+        elif property_type == "BypassDefensiveBuffs" and _has_extra_description(game_db, property_type) and "specials.v2.property.bypassdefensivebuffs.extra" in lang_db:
             extra_info = {"lang_id": "specials.v2.property.bypassdefensivebuffs.extra", "params": "{}", **generate_description("specials.v2.property.bypassdefensivebuffs.extra", {}, lang_db)}
         elif _has_extra_description(game_db, property_type):
             extra_info = _find_and_parse_extra_description(["specialproperty", "property"], property_type, search_context, lang_params, lang_db, hero_id, rules, parsers)
@@ -574,6 +1139,8 @@ def parse_status_effects(status_effects_list: list, special_data: dict, hero_sta
             parsed_items.append({"id":effect_id,"lang_id":"SEARCH_FAILED","en":f"Failed for {effect_id}","params":"{}"}); continue
         lang_params = {}; search_context = {**combined_details, "maxLevel": main_max_level}
         if (turns := combined_details.get("turns", 0)) > 0: lang_params["TURNS"] = turns
+        if combined_details.get("statusEffect") == "MoonBeamStatusEffectSkill":
+            lang_params.update(_moonbeam_params(combined_details, main_max_level))
         template_text = lang_db.get(lang_id,{}).get("en","")
         placeholders = set(re.findall(r'\{(\w+)\}', template_text))
         for p_holder in placeholders:
@@ -729,8 +1296,10 @@ def _resolve_passive_lang_ids_from_source(skill_data: dict, source_hint: dict, l
     return title_lang_id, desc_lang_id, source_hint.get("icon", "")
 
 
-def _passive_explicit_params(skill_data: dict, hero_stats: dict, main_max_level: int) -> dict:
+def _passive_explicit_params(skill_data: dict, hero_stats: dict, main_max_level: int, master_row: dict = None) -> dict:
     params = {}
+    change_formula = (master_row or {}).get("change_formula", "")
+
     for effect in skill_data.get("directEffectsOnResist") or []:
         effect_type = effect.get("effectType", "")
         if effect_type == "HealthBoost" and "fixedPower" in effect:
@@ -742,17 +1311,18 @@ def _passive_explicit_params(skill_data: dict, hero_stats: dict, main_max_level:
         if "turns" in status_effect:
             params["TURNS"] = status_effect.get("turns")
 
-        # Only handle the simple per-turn damage form here. More complex passive
-        # formulas, such as Molten Core charge scaling, stay unresolved until the
-        # calculation rule is explicit.
-        if status_effect.get("statusEffect") not in {"CorrosiveBurn"}:
-            base = status_effect.get("damageMultiplierPerMil")
-            inc = status_effect.get("damageMultiplierIncrementPerLevelPerMil", 0)
-            if base is not None:
-                multiplier = (base + inc * (main_max_level - 1)) / 1000
-                params["DAMAGEPERTURN"] = math.floor(multiplier * hero_stats.get("max_attack", 0))
-        if "multiplierPerMil" in status_effect and status_effect.get("statusEffect") not in {"CorrosiveBurn"}:
-            params["CHANGE"] = status_effect.get("multiplierPerMil", 0) / 10
+        base = status_effect.get("damageMultiplierPerMil")
+        inc = status_effect.get("damageMultiplierIncrementPerLevelPerMil", 0)
+        if base is not None:
+            multiplier = (base + inc * (main_max_level - 1)) / 1000
+            params["DAMAGEPERTURN"] = math.floor(multiplier * hero_stats.get("max_attack", 0))
+        if "multiplierPerMil" in status_effect:
+            if change_formula == "increment_abs":
+                # CHANGE = per-turn defense modifier increment, sign preserved (e.g. molten_core, arctic_core)
+                inc_per_turn = status_effect.get("multiplierIncrementPerTurnPerMil", 0)
+                params["CHANGE"] = inc_per_turn / 10
+            else:
+                params["CHANGE"] = status_effect.get("multiplierPerMil", 0) / 10
 
     return {
         key: int(value) if isinstance(value, float) and value.is_integer() else value
@@ -811,12 +1381,10 @@ def parse_passive_skills(passive_skills_list: list, hero_stats: dict, lang_db: d
 
         if title_lang_id and desc_lang_id:
             all_placeholders = set(re.findall(r'\{(\w+)\}', lang_db.get(title_lang_id,{}).get("en","") + lang_db.get(desc_lang_id,{}).get("en","")))
-            lang_params = _passive_explicit_params(skill_data, hero_stats, main_max_level)
+            lang_params = _passive_explicit_params(skill_data, hero_stats, main_max_level, master_row)
             search_context = {**skill_data, "maxLevel": main_max_level}
             for p_holder in all_placeholders:
                 if p_holder in lang_params:
-                    continue
-                if source_hint and p_holder in {"DAMAGEPERTURN", "CHANGE"}:
                     continue
                 value, found_key = find_and_calculate_value(p_holder, search_context, main_max_level, hero_id, rules, is_modifier=False)
                 if value is not None:

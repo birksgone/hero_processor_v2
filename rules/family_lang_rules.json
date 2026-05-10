@@ -1,0 +1,20 @@
+{
+  "description_lang_id_overrides": {
+    "nidavellir": "herocard.realmbonus.description.common.nidavellir"
+  },
+  "effect_lang_id_overrides": {
+    "attack_multiplier_classic": "familybonuses.description.long.attack_multiplier",
+    "defense_multiplier_classic": "familybonuses.description.long.defense_multiplier",
+    "heal_multiplier_classic": "familybonuses.description.long.heal_multiplier"
+  },
+  "candidate_patterns": {
+    "family_description": [
+      "herocard.family.description.common.{family_id}",
+      "herocard.realmbonus.description.common.{family_id}"
+    ],
+    "family_effect": [
+      "familybonuses.description.long.{effect_id}",
+      "familybonuses.description.short.{effect_id}"
+    ]
+  }
+}

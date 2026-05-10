@@ -1,2 +1,6 @@
-id,icon,title_lang_id,description_lang_id
-glass_reflect_debuffs,passive_glass_reflect.png,herocard.passive_skill.title.glass_reflect_debuffs,herocard.passive_skill.description.reflectstatuseffect.with_chance
+id,icon,title_lang_id,description_lang_id,change_formula
+glass_reflect_debuffs,passive_glass_reflect.png,herocard.passive_skill.title.glass_reflect_debuffs,herocard.passive_skill.description.reflectstatuseffect.with_chance,
+molten_core_costume,passive_molten_core.png,,,increment_abs
+molten_core,passive_molten_core.png,,,increment_abs
+arctic_core,passive_arctic_core.png,,,increment_abs
+arctic_core_costume,passive_arctic_core.png,,,increment_abs
