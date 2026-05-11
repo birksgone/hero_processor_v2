@@ -1,0 +1,148 @@
+{
+  "version": 2,
+  "global_rules": {
+    "display": {
+      "integer_only": true
+    },
+    "direct_effect": {
+      "exclude_from_status_signed_rules": true
+    },
+    "signed_policy": {
+      "description": "Signed values represent additive deltas that can be combined with other passive, family, buff, or debuff sources."
+    },
+    "status_params": {
+      "ATTACK": {
+        "type": "modifier",
+        "field": "attackMultiplierPerMil",
+        "inc_field": "attackMultiplierIncrementPerLevelPerMil",
+        "signed": true
+      },
+      "DEFENSE": {
+        "type": "modifier",
+        "field": "defenseMultiplierPerMil",
+        "inc_field": "defenseMultiplierIncrementPerLevelPerMil",
+        "signed": true
+      },
+      "MANAREGEN": {
+        "type": "modifier",
+        "field": "manaGenerationMultiplierPerMil",
+        "inc_field": "manaGenerationMultiplierIncrementPerLevelPerMil",
+        "signed": true
+      },
+      "CRIT": {
+        "type": "percent",
+        "field": "critIncrementPerMil",
+        "inc_field": "incrementPerLevelPerMil",
+        "signed": true
+      },
+      "HEALTH": {
+        "type": "percent",
+        "field": "healthPercentRecoveryPerMil",
+        "signed": true
+      }
+    }
+  },
+  "family_rules": {},
+  "skill_rules": {
+    "elemental_link": {
+      "match": {
+        "statusEffect_prefix": "ElementLink"
+      },
+      "params": {
+        "ATTACK": {
+          "type": "modifier",
+          "field": "attackMultiplierPerMil",
+          "inc_field": "attackMultiplierIncrementPerLevelPerMil",
+          "signed": true
+        },
+        "DEFENSE": {
+          "type": "modifier",
+          "field": "defenseMultiplierPerMil",
+          "inc_field": "defenseMultiplierIncrementPerLevelPerMil",
+          "signed": true
+        },
+        "MANAREGEN": {
+          "type": "modifier",
+          "field": "manaGenerationMultiplierPerMil",
+          "inc_field": "manaGenerationMultiplierIncrementPerLevelPerMil",
+          "signed": true
+        },
+        "CRIT": {
+          "type": "percent",
+          "field": "critIncrementPerMil",
+          "inc_field": "incrementPerLevelPerMil",
+          "signed": true
+        },
+        "HEALTH": {
+          "type": "percent",
+          "field": "healthPercentRecoveryPerMil",
+          "signed": true
+        }
+      }
+    },
+    "increasing_effect": {
+      "match": {
+        "statusEffect_prefix": "Increasing"
+      },
+      "params": {
+        "DEFENSE": {
+          "type": "modifier",
+          "field": "defenseMultiplierPerMil",
+          "inc_field": "defenseMultiplierIncrementPerLevelPerMil",
+          "signed": true
+        },
+        "DEFLECTION": {
+          "type": "percent",
+          "field": "damageDeflectionPerMil",
+          "inc_field": "damageDeflectionPerLevelPerMil",
+          "signed": false
+        },
+        "INCREASEPERTURN": [
+          {
+            "type": "percent",
+            "field": "damageDeflectionIncrementPerTurnPerMil",
+            "inc_field": "damageDeflectionIncrementPerTurnPerLevelPerMil",
+            "signed": true
+          },
+          {
+            "type": "percent",
+            "field": "defenseMultiplierIncrementPerTurnPerMil",
+            "inc_field": "defenseMultiplierIncrementPerTurnPerLevelPerMil",
+            "signed": false
+          }
+        ],
+        "CAP": {
+          "type": "modifier_cap",
+          "base_field": "defenseMultiplierPerMil",
+          "base_inc_field": "defenseMultiplierIncrementPerLevelPerMil",
+          "step_field": "defenseMultiplierIncrementPerTurnPerMil",
+          "step_inc_field": "defenseMultiplierIncrementPerTurnPerLevelPerMil",
+          "count_field": "maxIncreases",
+          "signed": true
+        },
+        "MAXDEFLECTION": {
+          "type": "cap_from_base_plus_step",
+          "base_field": "damageDeflectionPerMil",
+          "base_inc_field": "damageDeflectionPerLevelPerMil",
+          "step_field": "damageDeflectionIncrementPerTurnPerMil",
+          "step_inc_field": "damageDeflectionIncrementPerTurnPerLevelPerMil",
+          "count_field": "maxIncrementCount",
+          "signed": true
+        }
+      }
+    },
+    "stack": {
+      "match": {
+        "buff_prefix": "Stack"
+      },
+      "signed_percent_fallback": true
+    }
+  },
+  "hero_rules": {},
+  "ordering_rules": {
+    "global": {},
+    "family": {},
+    "skill": {},
+    "hero": {}
+  }
+}

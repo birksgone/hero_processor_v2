@@ -30,12 +30,14 @@ def generate_description(lang_id: str, lang_params: dict, lang_db: dict) -> dict
     return {"en": desc_en, "ja": desc_ja}
 
 def format_value(value):
-    """Formats numbers for display, removing trailing .0 and noisy decimals."""
+    """Formats numbers for display.
+
+    Game skill text uses integer values. Keep internal calculations free to use
+    floats, but never let preview/output text expose decimal noise such as
+    35.0 or 13.5.
+    """
     if isinstance(value, float):
-        rounded = round(value, 4)
-        if rounded.is_integer():
-            return int(rounded)
-        return f"{rounded:g}"
+        return int(math.copysign(math.floor(abs(value) + 0.5), value))
     return value
 
 
@@ -60,91 +62,151 @@ def _leveled_modifier_percent(data: dict, base_key: str, inc_key: str, max_level
     return (value - 1000) / 10
 
 
-def _increasing_status_effect_params(data_block: dict, max_level: int, placeholders: set[str]) -> dict:
-    """
-    Explicit param rules for Increasing* status effects.
+def _apply_signed(value, signed: bool):
+    return _format_signed(value) if signed else format_value(value)
 
-    These are common patterns, not hero-specific exceptions:
-    - stat modifier bases are relative to 1000 permil and need +/- signs
-    - per-turn increments use their own increment keys
-    - CAP / MAXDEFLECTION include the base value plus max stacked increases
-    """
+
+def _is_stack_effect(data_block: dict) -> bool:
+    return str(data_block.get("buff", "")).lower().startswith("stack")
+
+
+def _param_rule_value(data_block: dict, rule: dict, max_level: int):
+    rule_type = (rule or {}).get("type", "")
+    signed = bool((rule or {}).get("signed", False))
+
+    if rule_type in {"modifier", "modifier_base"}:
+        value = _leveled_modifier_percent(
+            data_block,
+            rule.get("field") or rule.get("base_key", ""),
+            rule.get("inc_field") or rule.get("inc_key", ""),
+            max_level,
+        )
+        return _apply_signed(value, signed) if value is not None else None
+
+    if rule_type in {"percent", "permil"}:
+        value = _leveled_permil_percent(
+            data_block,
+            rule.get("field") or rule.get("base_key", ""),
+            rule.get("inc_field") or rule.get("inc_key", ""),
+            max_level,
+        )
+        return _apply_signed(value, signed) if value is not None else None
+
+    if rule_type in {"modifier_cap", "cap_from_base_plus_step"}:
+        if rule_type == "modifier_cap":
+            base = _leveled_modifier_percent(
+                data_block,
+                rule.get("base_field") or rule.get("base_key", ""),
+                rule.get("base_inc_field") or rule.get("base_inc_key", ""),
+                max_level,
+            )
+        else:
+            base = _leveled_permil_percent(
+                data_block,
+                rule.get("base_field") or rule.get("base_key", ""),
+                rule.get("base_inc_field") or rule.get("base_inc_key", ""),
+                max_level,
+            )
+        step = _leveled_permil_percent(
+            data_block,
+            rule.get("step_field") or rule.get("step_key", ""),
+            rule.get("step_inc_field") or rule.get("step_inc_key", ""),
+            max_level,
+        )
+        count = data_block.get(rule.get("count_field") or rule.get("count_key", ""))
+        if isinstance(base, (int, float)) and isinstance(step, (int, float)) and isinstance(count, (int, float)):
+            return _apply_signed(base + step * count, signed)
+    return None
+
+
+def _rule_matches(data_block: dict, match: dict) -> bool:
+    if not match:
+        return True
+    for key, expected in match.items():
+        if key.endswith("_prefix"):
+            field = key[:-len("_prefix")]
+            actual = str(data_block.get(field, ""))
+            if not actual.startswith(str(expected)):
+                return False
+        else:
+            actual = data_block.get(key)
+            if isinstance(expected, list):
+                if actual not in expected:
+                    return False
+            elif actual != expected:
+                return False
+    return True
+
+
+def _apply_rule_params(data_block: dict, max_level: int, placeholders: set[str], params_rules: dict) -> dict:
     params = {}
-
-    if "DEFENSE" in placeholders and "defenseMultiplierPerMil" in data_block:
-        defense = _leveled_modifier_percent(
-            data_block,
-            "defenseMultiplierPerMil",
-            "defenseMultiplierIncrementPerLevelPerMil",
-            max_level,
-        )
-        if defense is not None:
-            params["DEFENSE"] = _format_signed(defense)
-
-    if "DEFLECTION" in placeholders and "damageDeflectionPerMil" in data_block:
-        deflection = _leveled_permil_percent(
-            data_block,
-            "damageDeflectionPerMil",
-            "damageDeflectionPerLevelPerMil",
-            max_level,
-        )
-        if deflection is not None:
-            params["DEFLECTION"] = format_value(deflection)
-
-    if "INCREASEPERTURN" in placeholders:
-        if "damageDeflectionIncrementPerTurnPerMil" in data_block:
-            value = _leveled_permil_percent(
-                data_block,
-                "damageDeflectionIncrementPerTurnPerMil",
-                "damageDeflectionIncrementPerTurnPerLevelPerMil",
-                max_level,
-            )
+    for placeholder in placeholders:
+        rule = params_rules.get(placeholder.upper()) or params_rules.get(placeholder)
+        if not rule:
+            continue
+        rule_candidates = rule if isinstance(rule, list) else [rule]
+        value = None
+        for candidate in rule_candidates:
+            value = _param_rule_value(data_block, candidate, max_level)
             if value is not None:
-                params["INCREASEPERTURN"] = _format_signed(value)
-        elif "defenseMultiplierIncrementPerTurnPerMil" in data_block:
-            value = _leveled_permil_percent(
+                break
+        if value is not None:
+            params[placeholder] = value
+    return params
+
+
+def _stack_status_params(data_block: dict, max_level: int, placeholders: set[str]) -> dict:
+    params = {}
+    flat_data = flatten_json(data_block)
+    for placeholder in placeholders:
+        keywords = _placeholder_keywords(placeholder)
+        candidates = []
+        for key, value in flat_data.items():
+            if not key.endswith("PerMil") or not isinstance(value, (int, float)):
+                continue
+            key_lower = key.lower()
+            if any(keyword in key_lower for keyword in keywords):
+                candidates.append(key)
+        if not candidates:
+            continue
+        found_key = sorted(candidates, key=len)[0]
+        inc_key = found_key.replace("PerMil", "IncrementPerLevelPerMil")
+        value = _leveled_permil_percent(data_block, found_key, inc_key, max_level)
+        if value is not None:
+            params[placeholder] = _format_signed(value)
+    return params
+
+
+def _global_status_params(data_block: dict, max_level: int, placeholders: set[str], param_calc_rules: dict = None) -> dict:
+    params_rules = ((param_calc_rules or {}).get("global_rules", {}) or {}).get("status_params", {})
+    if not params_rules:
+        return {}
+    return _apply_rule_params(data_block, max_level, placeholders, params_rules)
+
+
+def _skill_rule_status_params(data_block: dict, max_level: int, placeholders: set[str], param_calc_rules: dict = None) -> dict:
+    """Apply v2 skill_rules to a status-effect block."""
+    params = {}
+    skill_rules = (param_calc_rules or {}).get("skill_rules", {})
+    for rule_name, rule in skill_rules.items():
+        if not _rule_matches(data_block, rule.get("match", {})):
+            continue
+        if rule.get("params"):
+            params.update(_apply_rule_params(
                 data_block,
-                "defenseMultiplierIncrementPerTurnPerMil",
-                "defenseMultiplierIncrementPerTurnPerLevelPerMil",
                 max_level,
-            )
-            if value is not None:
-                params["INCREASEPERTURN"] = format_value(value)
-
-    if "CAP" in placeholders and "maxIncreases" in data_block:
-        base = _leveled_modifier_percent(
-            data_block,
-            "defenseMultiplierPerMil",
-            "defenseMultiplierIncrementPerLevelPerMil",
-            max_level,
-        )
-        step = _leveled_permil_percent(
-            data_block,
-            "defenseMultiplierIncrementPerTurnPerMil",
-            "defenseMultiplierIncrementPerTurnPerLevelPerMil",
-            max_level,
-        )
-        count = data_block.get("maxIncreases")
-        if isinstance(base, (int, float)) and isinstance(step, (int, float)) and isinstance(count, (int, float)):
-            params["CAP"] = _format_signed(base + step * count)
-
-    if "MAXDEFLECTION" in placeholders and "maxIncrementCount" in data_block:
-        base = _leveled_permil_percent(
-            data_block,
-            "damageDeflectionPerMil",
-            "damageDeflectionPerLevelPerMil",
-            max_level,
-        )
-        step = _leveled_permil_percent(
-            data_block,
-            "damageDeflectionIncrementPerTurnPerMil",
-            "damageDeflectionIncrementPerTurnPerLevelPerMil",
-            max_level,
-        )
-        count = data_block.get("maxIncrementCount")
-        if isinstance(base, (int, float)) and isinstance(step, (int, float)) and isinstance(count, (int, float)):
-            params["MAXDEFLECTION"] = _format_signed(base + step * count)
-
+                {p for p in placeholders if p not in params},
+                rule.get("params", {}),
+            ))
+        if rule.get("signed_percent_fallback") and _is_stack_effect(data_block):
+            params.update({
+                k: v for k, v in _stack_status_params(
+                    data_block,
+                    max_level,
+                    {p for p in placeholders if p not in params},
+                ).items()
+                if k not in params
+            })
     return params
 
 
@@ -998,9 +1060,6 @@ def find_and_calculate_value(p_holder: str, data_block: dict, max_level: int, he
                     return int(value), f"Exception Rule: {found_key}"
         return None, f"Exception rule key '{key_to_find}' not found or ambiguous"
     if not isinstance(data_block, dict): return None, None
-    explicit_params = _increasing_status_effect_params(data_block, max_level, {p_holder_upper})
-    if p_holder_upper in explicit_params:
-        return explicit_params[p_holder_upper], f"Explicit Rule: {p_holder_upper}"
     flat_data = flatten_json(data_block)
     if ignore_keywords:
         keys_to_remove = {k for k in flat_data if any(ik in k.lower() for ik in ignore_keywords)}
@@ -1280,7 +1339,18 @@ def parse_status_effects(status_effects_list: list, special_data: dict, hero_sta
             lang_params.update(_moonbeam_params(combined_details, main_max_level))
         template_text = lang_db.get(lang_id,{}).get("en","")
         placeholders = set(re.findall(r'\{(\w+)\}', template_text))
-        lang_params.update(_increasing_status_effect_params(combined_details, main_max_level, placeholders))
+        lang_params.update(_global_status_params(
+            combined_details,
+            main_max_level,
+            placeholders,
+            game_db.get("param_calc_rules", {}),
+        ))
+        lang_params.update(_skill_rule_status_params(
+            combined_details,
+            main_max_level,
+            placeholders,
+            game_db.get("param_calc_rules", {}),
+        ))
         for p_holder in placeholders:
             if p_holder in lang_params: continue
             value, found_key = find_and_calculate_value(p_holder, search_context, main_max_level, hero_id, rules, is_modifier='modifier' in combined_details.get('statusEffect','').lower())

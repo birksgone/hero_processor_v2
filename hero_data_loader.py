@@ -35,6 +35,7 @@ _LOCAL_JA = SCRIPT_DIR / "data" / "Japanese.csv"
 PASSIVE_MASTER_PATH = SCRIPT_DIR / "rules" / "passive_master.csv"
 PROPERTY_EXTRA_RULES_PATH = SCRIPT_DIR / "rules" / "property_extra_rules.json"
 FAMILY_LANG_RULES_PATH = SCRIPT_DIR / "rules" / "family_lang_rules.json"
+PARAM_CALC_RULES_PATH = SCRIPT_DIR / "rules" / "param_calc_rules.json"
 SOURCE_TEXT_DIR = Path(r"D:\PyScript\Hero Text Scraper\data\source_text\google_sheets_skill")
 CSV_EN_PATH = _LOCAL_EN if _LOCAL_EN.exists() else _FALLBACK_LANG_DIR / "English.csv"
 CSV_JA_PATH = _LOCAL_JA if _LOCAL_JA.exists() else _FALLBACK_LANG_DIR / "Japanese.csv"
@@ -208,6 +209,7 @@ def load_game_data() -> dict:
     game_data['passive_master'] = load_passive_master(PASSIVE_MASTER_PATH)
     game_data['property_extra_rules'] = load_property_extra_rules(PROPERTY_EXTRA_RULES_PATH)
     game_data['family_lang_rules'] = load_family_lang_rules(FAMILY_LANG_RULES_PATH)
+    game_data['param_calc_rules'] = load_param_calc_rules(PARAM_CALC_RULES_PATH)
     game_data['source_texts'] = load_source_texts(SOURCE_TEXT_DIR)
 
     # --- NEW: Load and consolidate keys that have extra descriptions (tooltips) ---
@@ -322,6 +324,36 @@ def load_family_lang_rules(path: Path) -> dict:
         return merged
     except Exception as e:
         print(f" -> Warning: Could not load family lang rules. Error: {e}")
+        return default
+
+
+def load_param_calc_rules(path: Path) -> dict:
+    """Loads external parameter calculation rules."""
+    default = {
+        "version": 2,
+        "global_rules": {},
+        "family_rules": {},
+        "skill_rules": {},
+        "hero_rules": {},
+        "ordering_rules": {},
+    }
+    if not path.exists():
+        print(f" -> Param calc rules not found: {path.name}")
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            print(f" -> Warning: Param calc rules must be a JSON object: {path.name}")
+            return default
+        merged = {**default, **data}
+        for key in ("global_rules", "family_rules", "skill_rules", "hero_rules", "ordering_rules"):
+            merged[key] = data.get(key) or {}
+        total = sum(len(merged.get(key, {})) for key in ("global_rules", "family_rules", "skill_rules", "hero_rules", "ordering_rules"))
+        print(f" -> Loaded param calc rules v{merged.get('version', 2)} with {total} rule sections from {path.name}.")
+        return merged
+    except Exception as e:
+        print(f" -> Warning: Could not load param calc rules. Error: {e}")
         return default
 
 
